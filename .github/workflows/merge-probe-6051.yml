@@ -1,0 +1,38 @@
+name: merge-probe-6051
+
+on:
+  push:
+    branches:
+      - tmp/merge-probe-6051-20260909
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Probe merge against current upstream master
+        shell: bash
+        run: |
+          set -uo pipefail
+          git remote add upstream https://github.com/nesquena/hermes-webui.git || true
+          git fetch upstream master
+          git config user.name merge-probe
+          git config user.email merge-probe@users.noreply.github.com
+          set +e
+          git merge --no-commit --no-ff upstream/master
+          rc=$?
+          set -e
+          echo "merge_exit=$rc"
+          echo "conflicted files:"
+          git diff --name-only --diff-filter=U || true
+          for f in $(git diff --name-only --diff-filter=U); do
+            echo "===== $f ====="
+            git checkout --conflict=diff3 -- "$f" || true
+            grep -n -B 20 -A 35 '^<<<<<<<' "$f" || true
+          done
+          git merge --abort || true
