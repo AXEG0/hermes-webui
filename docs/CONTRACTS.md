@@ -177,9 +177,15 @@ must consume that same resolved route.
 - An explicit provider with a blank model uses the Agent's authoritative
   auxiliary default. If the Agent has no default, preserve the blank model; do
   not substitute the WebUI picker catalog or the main route.
+- A blank implicit/auto route is resolved by the Agent's `title_generation`
+  route policy before WebUI injects request controls. This includes
+  `auxiliary.title_generation.prefer_fast_model`; WebUI must not freeze the
+  main model first and bypass that opt-in.
 - Reasoning suppression is injected only for a known compatible effective
   route. Unknown/custom routes, rejected provider routes, and routes with no
-  resolved model omit it (fail closed).
+  resolved model omit it (fail closed). MiniMax `reasoning_split` remains a
+  separate transport control keyed to the effective MiniMax route, not to the
+  generic reasoning-suppression capability.
 
 Release batches should list included contract-affecting PRs explicitly so
 reviewers can distinguish ordinary green-CI fixes from changes that update the
