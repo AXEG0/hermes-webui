@@ -315,8 +315,8 @@ class TestAuxReasoningExtraRouteContract:
         )
         assert request['extra_body'] is None
 
-    def test_unresolved_minimax_endpoint_omits_every_reasoning_extra(self):
-        """An unresolved custom route cannot inherit MiniMax-specific extras."""
+    def test_unresolved_minimax_endpoint_keeps_only_minimax_transport_control(self):
+        """MiniMax transport control is independent of generic reasoning suppression."""
         captured = []
 
         def call_llm(**kwargs):
@@ -338,7 +338,90 @@ class TestAuxReasoningExtraRouteContract:
         assert (request['provider'], request['model'], request['base_url']) == (
             'custom:unconfigured', None, 'https://api.minimaxi.com/v1',
         )
-        assert request['extra_body'] is None
+        assert request['extra_body'] == {'reasoning_split': True}
+
+    @pytest.mark.parametrize('provider', (
+        'minimax-oauth',
+        'minimax-portal',
+        'minimax-global',
+        'minimax_oauth',
+    ))
+    def test_minimax_oauth_and_agent_aliases_keep_title_controls(self, provider):
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        aliases = {
+            'minimax-oauth': 'minimax-oauth',
+            'minimax-portal': 'minimax-oauth',
+            'minimax-global': 'minimax-oauth',
+            'minimax_oauth': 'minimax-oauth',
+        }
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': provider,
+            'model': 'MiniMax-M2.7',
+            'base_url': '',
+        }), patch(
+            'agent.auxiliary_client._normalize_aux_provider',
+            side_effect=lambda value: aliases.get(value, value),
+            create=True,
+        ), patch(
+            'agent.auxiliary_client.call_llm', side_effect=call_llm, create=True,
+        ):
+            generate_title_raw_via_aux('question', 'answer')
+
+        request = captured[-1]
+        assert (request['provider'], request['model'], request['base_url']) == (
+            provider, 'MiniMax-M2.7', None,
+        )
+        assert request['extra_body'] == {
+            'reasoning': {'enabled': False},
+            'reasoning_split': True,
+        }
+
+    def test_auto_route_honors_agent_title_fast_model_resolution(self):
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        seen = {}
+
+        def main_route_target(runtime, task):
+            seen['runtime'] = dict(runtime)
+            seen['task'] = task
+            return ('opencode-zen', 'gemini-3-flash', '', '', '')
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': 'auto',
+            'model': '',
+            'base_url': '',
+            'prefer_fast_model': True,
+        }), patch('api.config.cfg', {
+            'model': {
+                'provider': 'opencode-zen',
+                'default': 'deepseek-v4-flash-free',
+                'base_url': '',
+            },
+        }), patch(
+            'agent.auxiliary_client._main_route_target',
+            side_effect=main_route_target,
+            create=True,
+        ), patch(
+            'agent.auxiliary_client.call_llm', side_effect=call_llm, create=True,
+        ):
+            generate_title_raw_via_aux('question', 'answer')
+
+        request = captured[-1]
+        assert seen['task'] == 'title_generation'
+        assert seen['runtime']['provider'] == 'opencode-zen'
+        assert seen['runtime']['model'] == 'deepseek-v4-flash-free'
+        assert (request['provider'], request['model'], request['base_url']) == (
+            'opencode-zen', 'gemini-3-flash', None,
+        )
 
     def test_blank_provider_minimax_global_endpoint_preserves_route_and_extras(self):
         """The canonical global MiniMax endpoint must not inherit the main route."""
