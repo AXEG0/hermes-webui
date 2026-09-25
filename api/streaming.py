@@ -4133,6 +4133,7 @@ _REASONING_EXTRA_COMPATIBLE_PROVIDER_IDS = frozenset({
     'vercel-ai-gateway',
     'ai_gateway',
     'aigateway',
+    'minimax-oauth',
 })
 
 
@@ -4179,7 +4180,15 @@ def _route_accepts_reasoning_extra(provider: str = '', model: str = '', base_url
         # Anthropic on OpenRouter: mandatory-reasoning families reject a disable.
         return False
 
-    provider_canonical = str(_resolve_provider_alias(provider_lower) or '').strip().lower()
+    try:
+        from agent.auxiliary_client import _normalize_aux_provider
+        provider_canonical = str(
+            _normalize_aux_provider(provider_lower) or ''
+        ).strip().lower()
+    except Exception:
+        provider_canonical = str(
+            _resolve_provider_alias(provider_lower) or ''
+        ).strip().lower()
     if (
         provider_lower in _REASONING_EXTRA_COMPATIBLE_PROVIDER_IDS
         or provider_canonical in _REASONING_EXTRA_COMPATIBLE_PROVIDER_IDS
@@ -4366,6 +4375,41 @@ def _effective_aux_title_route(provider: str, model: str, base_url: str) -> tupl
         # compatibility gate below.  Re-resolving through the WebUI picker can
         # replace it with a main-route or display-catalog model.
         return supplied_provider, own_default, supplied_base_url
+
+    # A blank implicit route is Agent-owned. Resolve it with the same title-task
+    # target calculation the auxiliary client uses so opt-ins such as
+    # auxiliary.title_generation.prefer_fast_model cannot be lost by WebUI
+    # pre-resolving the main model and then passing an explicit tuple to call_llm().
+    if implicit_route and not supplied_model and not supplied_base_url:
+        try:
+            model_cfg = get_config().get('model', {})
+            if isinstance(model_cfg, dict):
+                runtime = {
+                    'provider': str(model_cfg.get('provider') or '').strip(),
+                    'model': str(
+                        model_cfg.get('default') or model_cfg.get('name') or ''
+                    ).strip(),
+                    'base_url': str(model_cfg.get('base_url') or '').strip(),
+                    'api_key': model_cfg.get('api_key') or '',
+                    'api_mode': str(model_cfg.get('api_mode') or '').strip(),
+                }
+                from agent.auxiliary_client import _main_route_target
+                (
+                    resolved_provider,
+                    resolved_model,
+                    resolved_base_url,
+                    _resolved_api_key,
+                    _resolved_api_mode,
+                ) = _main_route_target(runtime, 'title_generation')
+                if resolved_provider or resolved_model or resolved_base_url:
+                    return (
+                        str(resolved_provider or supplied_provider),
+                        str(resolved_model or ''),
+                        str(resolved_base_url or ''),
+                    )
+        except Exception:
+            # Older/missing Agent runtimes fall back to the WebUI resolver below.
+            pass
 
     effective_model = supplied_model
     if not effective_model:
@@ -4587,8 +4631,10 @@ def generate_title_raw_via_aux(
     reasoning_extra = {}
     if _route_accepts_reasoning_extra(provider, model, base_url):
         reasoning_extra["reasoning"] = {"enabled": False}
-        if _is_minimax_route(provider, model, base_url):
-            reasoning_extra["reasoning_split"] = True
+    # MiniMax needs this transport control independently of whether the generic
+    # reasoning-disable payload is accepted. Keep the two capabilities separate.
+    if _is_minimax_route(provider, model, base_url):
+        reasoning_extra["reasoning_split"] = True
     base_max_tokens = _title_completion_budget(provider, model, base_url)
     try:
         _timeout = _aux_title_timeout()
