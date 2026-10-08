@@ -4119,12 +4119,35 @@ def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]
 
 
 def _is_minimax_route(provider: str = '', model: str = '', base_url: str = '') -> bool:
-    text = ' '.join([
-        str(provider or '').lower(),
-        str(model or '').lower(),
-        str(base_url or '').lower(),
-    ])
-    return 'minimax' in text or 'minimaxi.com' in text
+    """Identify a verified MiniMax transport, not a model name or URL path.
+
+    Custom relays mentioning MiniMax do not necessarily support reasoning_split.
+    """
+    from urllib.parse import urlsplit
+
+    raw_url = str(base_url or '').strip()
+    try:
+        host = (urlsplit(raw_url).hostname or '').lower()
+    except ValueError:
+        return False
+    if (
+        host == 'api.minimaxi.com'
+        or host.endswith('.api.minimaxi.com')
+        or host == 'api.minimax.io'
+        or host.endswith('.api.minimax.io')
+    ):
+        return True
+    if raw_url:
+        # Even built-in provider names can be redirected to strict custom
+        # relays which may not accept MiniMax-only transport controls.
+        return False
+    provider_name = str(provider or '').strip().lower()
+    try:
+        from agent.auxiliary_client import _normalize_aux_provider
+        provider_name = str(_normalize_aux_provider(provider_name) or provider_name).lower()
+    except Exception:
+        provider_name = str(_resolve_provider_alias(provider_name) or provider_name).lower()
+    return provider_name in {'minimax', 'minimax-oauth', 'minimax-portal', 'minimax-global'}
 
 
 _REASONING_EXTRA_COMPATIBLE_PROVIDER_IDS = frozenset({
@@ -4324,7 +4347,7 @@ def _aux_default_model_for_provider(provider: str) -> str:
         return ''
 
 
-def _effective_aux_title_route(provider: str, model: str, base_url: str) -> tuple[str, str, str]:
+def _effective_aux_title_route(provider: str, model: str, base_url: str, *, resolved_credentials: Optional[dict] = None) -> tuple[str, str, str]:
     """Resolve the one auxiliary title route used for requests and compatibility.
 
     Only implicit, auto/local, and picker routes inherit resolver output.  A
@@ -4402,6 +4425,10 @@ def _effective_aux_title_route(provider: str, model: str, base_url: str) -> tupl
                     _resolved_api_mode,
                 ) = _main_route_target(runtime, 'title_generation')
                 if resolved_provider or resolved_model or resolved_base_url:
+                    if resolved_credentials is not None:
+                        # Keep credentials with the Agent-selected effective route.
+                        # The title task's own key still takes precedence.
+                        resolved_credentials['api_key'] = str(_resolved_api_key or '').strip()
                     return (
                         str(resolved_provider or supplied_provider),
                         str(resolved_model or ''),
@@ -4469,10 +4496,15 @@ def _aux_title_generation_enabled() -> bool:
 def _aux_title_configured() -> bool:
     """Return True when any auxiliary title_generation config field is meaningfully set."""
     tg = _get_aux_title_config()
-    provider = tg.get('provider', '') or ''
+    provider = str(tg.get('provider', '') or '').strip()
     model = tg.get('model', '') or ''
     base_url = tg.get('base_url', '') or ''
-    return bool(model or base_url or (provider and provider.lower() != 'auto'))
+    prefer_fast = tg.get('prefer_fast_model', False)
+    if isinstance(prefer_fast, str):
+        prefer_fast = prefer_fast.strip().lower() in ('1', 'true', 'yes', 'on')
+    # An implicit/auto route with prefer_fast_model is still a configured
+    # auxiliary route. Both title callers use this predicate.
+    return bool(model or base_url or (provider and provider.lower() != 'auto') or prefer_fast)
 
 def _aux_title_timeout(default: float = 15.0) -> float:
     """Return the configured timeout (seconds) for auxiliary title generation.
@@ -4625,9 +4657,12 @@ def generate_title_raw_via_aux(
     api_key = ''
     if not caller_supplied_route:
         api_key = str(configured.get('api_key', '') or '').strip()
+    route_credentials = {}
     provider, model, base_url = _effective_aux_title_route(
-        provider, model, base_url,
+        provider, model, base_url, resolved_credentials=route_credentials,
     )
+    if not api_key:
+        api_key = route_credentials.get('api_key', '')
     reasoning_extra = {}
     if _route_accepts_reasoning_extra(provider, model, base_url):
         reasoning_extra["reasoning"] = {"enabled": False}
