@@ -46,9 +46,10 @@ def test_collection_preserves_the_real_agent_package():
     assert _AGENT_AFTER_COLLECTION is _AGENT_BEFORE_COLLECTION
     assert getattr(_AGENT_AFTER_COLLECTION, "__spec__", _MISSING) is _AGENT_SPEC_BEFORE_COLLECTION
     assert getattr(_AGENT_AFTER_COLLECTION, "__path__", _MISSING) is _AGENT_PATH_BEFORE_COLLECTION
-    assert _AGENT_SPEC_BEFORE_COLLECTION is not None
-    assert _AGENT_PATH_BEFORE_COLLECTION is not _MISSING
-    assert importlib.import_module("agent.model_metadata") is not None
+    # Earlier tests can insert a spec-less synthetic agent module. This
+    # module must preserve it, not claim that the pre-existing stub was real.
+    if _AGENT_SPEC_BEFORE_COLLECTION is not None and _AGENT_PATH_BEFORE_COLLECTION is not _MISSING:
+        assert importlib.import_module("agent.model_metadata") is not None
 
 
 @pytest.fixture
@@ -380,6 +381,72 @@ class TestAuxReasoningExtraRouteContract:
             'reasoning': {'enabled': False},
             'reasoning_split': True,
         }
+
+    @pytest.mark.parametrize(('provider', 'model', 'url'), (
+        ('custom:relay', 'MiniMax-M3', 'https://relay.example/v1'),
+        ('custom:relay', 'vendor/model', 'https://relay.example/minimax/v1'),
+        ('custom:relay', 'minimax-model', 'https://relay.example/minimaxi.com/v1'),
+    ))
+    def test_custom_relay_cannot_spoof_minimax_transport(self, provider, model, url):
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': provider, 'model': model, 'base_url': url,
+        }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+            generate_title_raw_via_aux('question', 'answer')
+
+        assert captured[-1]['extra_body'] is None
+
+    def test_main_resolved_key_is_sent_with_implicit_title_route(self):
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': 'auto', 'model': '', 'base_url': '',
+            'prefer_fast_model': True,
+        }), patch('api.config.cfg', {
+            'model': {'provider': 'opencode-zen', 'default': 'main-model', 'api_key': 'main-key'},
+        }), patch(
+            'agent.auxiliary_client._main_route_target',
+            return_value=('opencode-zen', 'fast-model', '', 'resolved-key', ''),
+            create=True,
+        ), patch(
+            'agent.auxiliary_client.call_llm', side_effect=call_llm, create=True,
+        ):
+            generate_title_raw_via_aux('question', 'answer')
+
+        assert captured[-1]['model'] == 'fast-model'
+        assert captured[-1]['api_key'] == 'resolved-key'
+
+    def test_explicit_title_key_takes_precedence_over_main_resolved_key(self):
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': 'auto', 'model': '', 'base_url': '',
+            'prefer_fast_model': True, 'api_key': 'title-key',
+        }), patch('api.config.cfg', {
+            'model': {'provider': 'opencode-zen', 'default': 'main-model'},
+        }), patch(
+            'agent.auxiliary_client._main_route_target',
+            return_value=('opencode-zen', 'fast-model', '', 'resolved-key', ''),
+            create=True,
+        ), patch(
+            'agent.auxiliary_client.call_llm', side_effect=call_llm, create=True,
+        ):
+            generate_title_raw_via_aux('question', 'answer')
+
+        assert captured[-1]['api_key'] == 'title-key'
 
     def test_auto_route_honors_agent_title_fast_model_resolution(self):
         captured = []
