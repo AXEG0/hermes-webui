@@ -177,10 +177,15 @@ must consume that same resolved route.
 - An explicit provider with a blank model uses the Agent's authoritative
   auxiliary default. If the Agent has no default, preserve the blank model; do
   not substitute the WebUI picker catalog or the main route.
-- A blank implicit/auto route is resolved by the Agent's `title_generation`
-  route policy before WebUI injects request controls. This includes
-  `auxiliary.title_generation.prefer_fast_model`; WebUI must not freeze the
-  main model first and bypass that opt-in.
+- A blank implicit/auto route is resolved using the Agent's full
+  `title_generation` availability and fallback policy before WebUI injects
+  request controls. The Agent-selected provider/model/endpoint must be used
+  for the request rather than freezing an unavailable main route. This also
+  includes `auxiliary.title_generation.prefer_fast_model`.
+- An inherited main route retains the main model's resolved transport
+  (`api_mode`, including `anthropic_messages`). An explicit title-task
+  `api_mode` overrides it. A fallback provider retains its own endpoint
+  and transport rather than inheriting the failed main route's protocol.
 - Reasoning suppression is injected only for a known compatible effective
   route. Unknown/custom routes, rejected provider routes, and routes with no
   resolved model omit it (fail closed). MiniMax `reasoning_split` remains a
