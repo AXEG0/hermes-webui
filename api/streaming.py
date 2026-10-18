@@ -4451,13 +4451,13 @@ def _effective_aux_title_route(provider: str, model: str, base_url: str, *, reso
                                 auto_provider == str(resolved_provider or '')
                                 and str(auto_model) == str(resolved_model or '')
                             )
-                            # A named custom fallback owns its own endpoint.
-                            # An anonymous custom fallback needs the endpoint
-                            # selected by the Agent, not the dead main URL.
+                            # A named custom fallback owns its configured
+                            # endpoint and transport. Other fallback clients
+                            # must keep the endpoint the Agent actually chose.
                             auto_url = (
                                 str(resolved_base_url or '') if is_main_route
+                                else '' if auto_provider.startswith('custom:')
                                 else str(getattr(auto_client, 'base_url', '') or '')
-                                if auto_provider == 'custom' else ''
                             )
                             if resolved_credentials is not None:
                                 selected_key = (
@@ -4467,6 +4467,13 @@ def _effective_aux_title_route(provider: str, model: str, base_url: str, *, reso
                                 resolved_credentials['api_key'] = selected_key or ''
                                 if is_main_route:
                                     resolved_credentials['api_mode'] = str(_resolved_api_mode or '')
+                                elif (
+                                    auto_provider == 'custom'
+                                    and type(auto_client).__name__ == 'AnthropicAuxiliaryClient'
+                                ):
+                                    # Anonymous fallback with Anthropic wire
+                                    # requires the transport of its selected client.
+                                    resolved_credentials['api_mode'] = 'anthropic_messages'
                             return auto_provider, str(auto_model), auto_url
                     except ImportError:
                         # Older Agent installations do not expose full auto
