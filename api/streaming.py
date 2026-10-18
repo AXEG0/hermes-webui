@@ -4135,6 +4135,8 @@ def _is_minimax_route(provider: str = '', model: str = '', base_url: str = '') -
         or host.endswith('.api.minimaxi.com')
         or host == 'api.minimax.io'
         or host.endswith('.api.minimax.io')
+        or host == 'api.minimax.chat'
+        or host.endswith('.api.minimax.chat')
     ):
         return True
     if raw_url:
@@ -4425,10 +4427,54 @@ def _effective_aux_title_route(provider: str, model: str, base_url: str, *, reso
                     _resolved_api_mode,
                 ) = _main_route_target(runtime, 'title_generation')
                 if resolved_provider or resolved_model or resolved_base_url:
+                    # _main_route_target chooses a preferred *candidate*, not a
+                    # verified provider. The Agent's full auto resolver must be
+                    # consulted before an implicit route is made explicit: it
+                    # checks availability and configured fallback_providers.
+                    try:
+                        from agent.auxiliary_client import (
+                            _effective_provider_for_client, _resolve_auto_route,
+                        )
+                        auto_client, auto_model, auto_provider = _resolve_auto_route(
+                            main_runtime=runtime, task='title_generation',
+                        )
+                        if auto_client is None:
+                            # Do not pin an unavailable main model. Leave auto
+                            # resolution to the Agent call boundary.
+                            return '', '', ''
+                        auto_provider = str(
+                            _effective_provider_for_client(auto_client, auto_provider)
+                            or auto_provider or ''
+                        )
+                        if auto_provider and auto_model:
+                            is_main_route = (
+                                auto_provider == str(resolved_provider or '')
+                                and str(auto_model) == str(resolved_model or '')
+                            )
+                            # A named custom fallback owns its own endpoint.
+                            # An anonymous custom fallback needs the endpoint
+                            # selected by the Agent, not the dead main URL.
+                            auto_url = (
+                                str(resolved_base_url or '') if is_main_route
+                                else str(getattr(auto_client, 'base_url', '') or '')
+                                if auto_provider == 'custom' else ''
+                            )
+                            if resolved_credentials is not None:
+                                selected_key = (
+                                    _resolved_api_key if is_main_route
+                                    else getattr(auto_client, 'api_key', '')
+                                )
+                                resolved_credentials['api_key'] = selected_key or ''
+                                if is_main_route:
+                                    resolved_credentials['api_mode'] = str(_resolved_api_mode or '')
+                            return auto_provider, str(auto_model), auto_url
+                    except ImportError:
+                        # Older Agent installations do not expose full auto
+                        # resolution. Retain the legacy candidate fallback.
+                        pass
                     if resolved_credentials is not None:
-                        # Keep credentials with the Agent-selected effective route.
-                        # The title task's own key still takes precedence.
-                        resolved_credentials['api_key'] = str(_resolved_api_key or '').strip()
+                        resolved_credentials['api_key'] = _resolved_api_key or ''
+                        resolved_credentials['api_mode'] = str(_resolved_api_mode or '')
                     return (
                         str(resolved_provider or supplied_provider),
                         str(resolved_model or ''),
@@ -4663,6 +4709,10 @@ def generate_title_raw_via_aux(
     )
     if not api_key:
         api_key = route_credentials.get('api_key', '')
+    # A task-specific transport setting takes precedence. Otherwise keep the
+    # working main route's transport (notably custom anthropic_messages) when
+    # the title route is inherited from the main model.
+    api_mode = str(configured.get('api_mode') or route_credentials.get('api_mode') or '').strip()
     reasoning_extra = {}
     if _route_accepts_reasoning_extra(provider, model, base_url):
         reasoning_extra["reasoning"] = {"enabled": False}
@@ -4689,6 +4739,7 @@ def generate_title_raw_via_aux(
                         model=model or None,
                         base_url=base_url or None,
                         api_key=api_key or None,
+                        api_mode=api_mode or None,
                         messages=messages,
                         max_tokens=max_tokens,
                         temperature=0.2,
