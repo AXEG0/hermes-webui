@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -644,3 +645,127 @@ class TestAuxReasoningExtraRouteContract:
         output = '\n'.join(' '.join(map(str, args)) for args in logged)
         for marker in ('USER', 'PASSWORD', 'KEY', 'TOKEN'):
             assert marker not in output
+
+
+@pytest.mark.usefixtures("_scoped_auxiliary_client_module")
+class TestResolvedAutoTitleTransportAndFallback:
+    """Regressions for the title route re-gated on 2026-10-08."""
+
+    @pytest.mark.parametrize("task_mode, expected_mode", (
+        ("", "anthropic_messages"),
+        ("codex_responses", "codex_responses"),
+    ))
+    def test_auto_title_retains_main_anthropic_transport_unless_task_overrides(
+        self, task_mode, expected_mode,
+    ):
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {"choices": [{"message": {"content": "Working title"}, "finish_reason": "stop"}]}
+
+        config = {"provider": "auto", "model": "", "base_url": ""}
+        if task_mode:
+            config["api_mode"] = task_mode
+        resolved_client = SimpleNamespace(
+            api_key="runtime-key", base_url="https://anthropic-wire.example/v1",
+        )
+        with patch("api.streaming._get_aux_title_config", return_value=config), patch(
+            "api.config.cfg",
+            {"model": {
+                "provider": "custom", "default": "main-model",
+                "base_url": "https://anthropic-wire.example/v1",
+                "api_key": "runtime-key", "api_mode": "anthropic_messages",
+            }},
+        ), patch(
+            "agent.auxiliary_client._main_route_target",
+            return_value=(
+                "custom", "main-model", "https://anthropic-wire.example/v1",
+                "runtime-key", "anthropic_messages",
+            ),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._resolve_auto_route",
+            return_value=(resolved_client, "main-model", "custom"),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._effective_provider_for_client",
+            side_effect=lambda client, provider: provider,
+            create=True,
+        ), patch("agent.auxiliary_client.call_llm", side_effect=call_llm, create=True):
+            title, status = generate_title_raw_via_aux("question", "answer")
+
+        assert (title, status) == ("Working title", "llm_aux")
+        assert captured[-1]["api_mode"] == expected_mode
+        assert captured[-1]["base_url"] == "https://anthropic-wire.example/v1"
+
+    def test_auto_title_selects_working_fallback_instead_of_unavailable_main(self):
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {"choices": [{"message": {"content": "Fallback title"}, "finish_reason": "stop"}]}
+
+        fallback_client = SimpleNamespace(
+            api_key="fallback-key", base_url="https://fallback.example/v1",
+        )
+        with patch("api.streaming._get_aux_title_config", return_value={
+            "provider": "auto", "model": "", "base_url": "",
+        }), patch("api.config.cfg", {
+            "model": {"provider": "custom:unavailable", "default": "dead-model",
+                      "api_mode": "anthropic_messages"},
+        }), patch(
+            "agent.auxiliary_client._main_route_target",
+            return_value=("custom:unavailable", "dead-model", "", "", "anthropic_messages"),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._resolve_auto_route",
+            return_value=(fallback_client, "fallback-model", "custom"),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._effective_provider_for_client",
+            side_effect=lambda client, provider: provider,
+            create=True,
+        ), patch("agent.auxiliary_client.call_llm", side_effect=call_llm, create=True):
+            title, status = generate_title_raw_via_aux("question", "answer")
+
+        assert (title, status) == ("Fallback title", "llm_aux")
+        assert captured[-1]["provider"] == "custom"
+        assert captured[-1]["model"] == "fallback-model"
+        assert captured[-1]["base_url"] == "https://fallback.example/v1"
+        assert captured[-1]["api_key"] == "fallback-key"
+        assert captured[-1]["api_mode"] is None  # Do not leak the failed main transport.
+
+    def test_minimax_chat_is_a_verified_minimax_endpoint(self):
+        from api.streaming import _is_minimax_route
+        assert _is_minimax_route("custom", "MiniMax-M3", "https://api.minimax.chat/v1")
+        assert not _is_minimax_route(
+            "custom", "MiniMax-M3", "https://relay.example/minimax.chat/v1"
+        )
+
+
+def test_real_agent_auto_resolver_selects_configured_fallback():
+    """Exercise the installed Agent's real fallback decision, not a mock of the resolver."""
+    try:
+        aux = importlib.import_module("agent.auxiliary_client")
+    except Exception:
+        pytest.skip("Agent auxiliary runtime is unavailable")
+    if not hasattr(aux, "_resolve_auto_route"):
+        pytest.skip("Installed Agent lacks the full auto resolver")
+    fallback_client = SimpleNamespace(
+        api_key="fallback-key", base_url="https://fallback.example/v1",
+    )
+    with patch.object(aux, "_main_route_target", return_value=(
+        "custom:unavailable", "dead-model", "", "", "anthropic_messages",
+    )), patch.object(aux, "_try_main_provider_route", return_value=None), patch.object(
+        aux, "_try_configured_fallback_chain", return_value=(None, None, ""),
+    ), patch.object(
+        aux, "_try_main_fallback_chain",
+        return_value=(fallback_client, "fallback-model", "custom"),
+    ):
+        client, model, provider = aux._resolve_auto_route(
+            main_runtime={"provider": "custom:unavailable", "model": "dead-model"},
+            task="title_generation",
+        )
+    assert client is fallback_client
+    assert (model, provider) == ("fallback-model", "custom")
